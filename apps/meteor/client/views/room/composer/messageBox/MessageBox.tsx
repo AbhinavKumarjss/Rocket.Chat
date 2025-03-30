@@ -14,7 +14,7 @@ import {
 import { useTranslation, useUserPreference, useLayout, useSetting } from '@rocket.chat/ui-contexts';
 import { useMutation } from '@tanstack/react-query';
 import type { ReactElement, FormEvent, MouseEvent, ClipboardEvent } from 'react';
-import { memo, useRef, useReducer, useCallback, useSyncExternalStore } from 'react';
+import { memo, useRef, useReducer, useCallback, useSyncExternalStore, useState } from 'react';
 
 import MessageBoxActionsToolbar from './MessageBoxActionsToolbar';
 import MessageBoxFormattingToolbar from './MessageBoxFormattingToolbar';
@@ -44,6 +44,7 @@ import { useMessageComposerMergedRefs } from '../hooks/useMessageComposerMergedR
 import { useMessageBoxAutoFocus } from './hooks/useMessageBoxAutoFocus';
 import { useMessageBoxPlaceholder } from './hooks/useMessageBoxPlaceholder';
 import { useSafeRefCallback } from '../../../../hooks/useSafeRefCallback';
+import ContentEditableDiv from '../ContentEditableDiv';
 
 const reducer = (_: unknown, event: FormEvent<HTMLInputElement>): boolean => {
 	const target = event.target as HTMLInputElement;
@@ -114,6 +115,8 @@ const MessageBox = ({
 	const composerPlaceholder = useMessageBoxPlaceholder(t('Message'), room);
 
 	const [typing, setTyping] = useReducer(reducer, false);
+	const [contentEditableValue, setContentEditableValue] = useState('');
+	const contentEditableRef = useRef<HTMLDivElement>(null);
 
 	const { isMobile } = useLayout();
 	const sendOnEnterBehavior = useUserPreference<'normal' | 'alternative' | 'desktop'>('sendOnEnter') || isMobile;
@@ -163,6 +166,11 @@ const MessageBox = ({
 		const text = chat.composer?.text ?? '';
 		chat.composer?.clear();
 		popup.clear();
+		
+		setContentEditableValue('');
+		if (contentEditableRef.current) {
+			contentEditableRef.current.innerText = '';
+		}
 
 		onSend?.({
 			value: text,
@@ -171,6 +179,33 @@ const MessageBox = ({
 			isSlashCommandAllowed,
 		});
 	});
+
+	const handleContentEditableChange = useCallback((value: string) => {
+		setContentEditableValue(value);
+	}, []);
+
+	const handleContentEditableKeyDown = useCallback((event: KeyboardEvent) => {
+		const { which: keyCode } = event;
+
+		const isSubmitKey = keyCode === keyCodes.CARRIAGE_RETURN || keyCode === keyCodes.NEW_LINE;
+
+		if (isSubmitKey) {
+			const withModifier = event.shiftKey || event.ctrlKey || event.altKey || event.metaKey;
+			const isSending = (sendOnEnter && !withModifier) || (!sendOnEnter && withModifier);
+
+			if (isSending && contentEditableValue.trim()) {
+				event.preventDefault();
+				
+				if (chat.composer && textareaRef.current) {
+					chat.composer.setText(contentEditableValue);
+					handleSendMessage();
+				}
+				return;
+			}
+		}
+		
+		onTyping?.();
+	}, [contentEditableValue, sendOnEnter, chat.composer, handleSendMessage, onTyping]);
 
 	const closeEditing = (event: KeyboardEvent | MouseEvent<HTMLElement>) => {
 		if (chat.currentEditing) {
@@ -364,12 +399,6 @@ const MessageBox = ({
 					renderItem={popup.option.renderItem}
 				/>
 			)}
-			{/*
-				SlashCommand Preview popup works in a weird way
-				There is only one trigger for all the commands: "/"
-				After that we need to the slashcommand list and check if the command exists and provide the preview
-				if not the query is `suspend` which means the slashcommand is not found or doesn't have a preview
-			*/}
 			{popup.option?.preview && (
 				<ComposerBoxPopupPreview
 					select={popup.select}
@@ -392,6 +421,15 @@ const MessageBox = ({
 			{isRecordingVideo && <VideoMessageRecorder reference={messageComposerRef} rid={room._id} tmid={tmid} />}
 			<MessageComposer ref={messageComposerRef} variant={isEditing ? 'editing' : undefined}>
 				{isRecordingAudio && <AudioMessageRecorder rid={room._id} isMicrophoneDenied={isMicrophoneDenied} />}
+				<ContentEditableDiv
+					ref={contentEditableRef}
+					placeholder={`${composerPlaceholder} (Rich Input)`}
+					value={contentEditableValue}
+					onChange={handleContentEditableChange}
+					onKeyDown={handleContentEditableKeyDown}
+					disabled={isRecording || !canSend}
+					aria-label={`${composerPlaceholder} Rich Input`}
+				/>
 				<MessageComposerInput
 					ref={mergedRefs}
 					aria-label={composerPlaceholder}
@@ -443,10 +481,10 @@ const MessageBox = ({
 								<MessageComposerAction
 									aria-label={t('Send')}
 									icon='send'
-									disabled={!canSend || (!typing && !isEditing)}
+									disabled={!canSend || (!typing && !isEditing && !contentEditableValue.trim())}
 									onClick={handleSendMessage}
-									secondary={typing || isEditing}
-									info={typing || isEditing}
+									secondary={typing || isEditing || !!contentEditableValue.trim()}
+									info={typing || isEditing || !!contentEditableValue.trim()}
 								/>
 							</>
 						)}
