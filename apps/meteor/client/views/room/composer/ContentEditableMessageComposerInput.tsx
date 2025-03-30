@@ -17,7 +17,8 @@ const contentEditableMessageComposerStyle = css`
 	font-size: 0.875rem;
 	line-height: 1.25rem;
 	font-weight: 400;
-	color: ${Palette.text.default};
+    cursor: text;
+	color: ${Palette.text['font-default']};
 
 	&::placeholder {
 		color: ${Palette.text['font-annotation']};
