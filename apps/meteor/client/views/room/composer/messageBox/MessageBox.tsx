@@ -5,7 +5,6 @@ import {
 	MessageComposerAction,
 	MessageComposerToolbarActions,
 	MessageComposer,
-	MessageComposerInput,
 	MessageComposerToolbar,
 	MessageComposerActionsDivider,
 	MessageComposerToolbarSubmit,
@@ -44,12 +43,13 @@ import { useMessageComposerMergedRefs } from '../hooks/useMessageComposerMergedR
 import { useMessageBoxAutoFocus } from './hooks/useMessageBoxAutoFocus';
 import { useMessageBoxPlaceholder } from './hooks/useMessageBoxPlaceholder';
 import { useSafeRefCallback } from '../../../../hooks/useSafeRefCallback';
-import ContentEditableDiv from '../ContentEditableDiv';
+import ContentEditableMessageComposerInput from '../ContentEditableMessageComposerInput';
+import { createContentEditableComposerAPI } from '../ContentEditableComposerAPI';
 
-const reducer = (_: unknown, event: FormEvent<HTMLInputElement>): boolean => {
-	const target = event.target as HTMLInputElement;
-
-	return Boolean(target.value.trim());
+const reducer = (_: unknown, event: FormEvent<HTMLElement>): boolean => {
+	const target = event.target as HTMLElement;
+	// For contentEditable, we get the innerText
+	return Boolean((target.innerText || '').trim());
 };
 
 const handleFormattingShortcut = (event: KeyboardEvent, formattingButtons: FormattingButton[], composer: ComposerAPI) => {
@@ -115,9 +115,8 @@ const MessageBox = ({
 	const composerPlaceholder = useMessageBoxPlaceholder(t('Message'), room);
 
 	const [typing, setTyping] = useReducer(reducer, false);
-	const [contentEditableValue, setContentEditableValue] = useState('');
-	const contentEditableRef = useRef<HTMLDivElement>(null);
-
+	const [composerValue, setComposerValue] = useState('');
+	
 	const { isMobile } = useLayout();
 	const sendOnEnterBehavior = useUserPreference<'normal' | 'alternative' | 'desktop'>('sendOnEnter') || isMobile;
 	const sendOnEnter = sendOnEnterBehavior == null || sendOnEnterBehavior === 'normal' || (sendOnEnterBehavior === 'desktop' && !isMobile);
@@ -126,14 +125,14 @@ const MessageBox = ({
 		throw new Error('Chat context not found');
 	}
 
-	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const composerRef = useRef<HTMLDivElement>(null);
 	const messageComposerRef = useRef<HTMLElement>(null);
 	const shadowRef = useRef<HTMLDivElement>(null);
 
 	const storageID = `messagebox_${room._id}${tmid ? `-${tmid}` : ''}`;
 
 	const callbackRef = useCallback(
-		(node: HTMLTextAreaElement) => {
+		(node: HTMLDivElement) => {
 			if (node === null && chat.composer) {
 				return chat.setComposerAPI();
 			}
@@ -141,7 +140,7 @@ const MessageBox = ({
 			if (chat.composer) {
 				return;
 			}
-			chat.setComposerAPI(createComposerAPI(node, storageID));
+			chat.setComposerAPI(createContentEditableComposerAPI(node, storageID));
 		},
 		[chat, storageID],
 	);
@@ -167,10 +166,7 @@ const MessageBox = ({
 		chat.composer?.clear();
 		popup.clear();
 		
-		setContentEditableValue('');
-		if (contentEditableRef.current) {
-			contentEditableRef.current.innerText = '';
-		}
+		setComposerValue('');
 
 		onSend?.({
 			value: text,
@@ -180,11 +176,15 @@ const MessageBox = ({
 		});
 	});
 
-	const handleContentEditableChange = useCallback((value: string) => {
-		setContentEditableValue(value);
+	// Handle input change
+	const handleComposerChange = useCallback((event: FormEvent<HTMLDivElement>) => {
+		const element = event.target as HTMLDivElement;
+		setComposerValue(element.innerText || '');
+		setTyping(event);
 	}, []);
 
-	const handleContentEditableKeyDown = useCallback((event: KeyboardEvent) => {
+	// Handle key down events directly on the content-editable div
+	const handleComposerKeyDown = useCallback((event: KeyboardEvent) => {
 		const { which: keyCode } = event;
 
 		const isSubmitKey = keyCode === keyCodes.CARRIAGE_RETURN || keyCode === keyCodes.NEW_LINE;
@@ -193,19 +193,78 @@ const MessageBox = ({
 			const withModifier = event.shiftKey || event.ctrlKey || event.altKey || event.metaKey;
 			const isSending = (sendOnEnter && !withModifier) || (!sendOnEnter && withModifier);
 
-			if (isSending && contentEditableValue.trim()) {
+			if (isSending && composerValue.trim()) {
 				event.preventDefault();
-				
-				if (chat.composer && textareaRef.current) {
-					chat.composer.setText(contentEditableValue);
-					handleSendMessage();
+				handleSendMessage();
+				return;
+			}
+			
+			if (!isSending) {
+				// Insert a new line
+				chat.composer?.insertNewLine();
+				return;
+			}
+		}
+		
+		if (chat.composer && handleFormattingShortcut(event, [...formattingButtons], chat.composer)) {
+			return;
+		}
+		
+		if (event.shiftKey || event.ctrlKey || event.metaKey) {
+			return;
+		}
+		
+		switch (event.key) {
+			case 'Escape': {
+				const target = event.target as HTMLElement;
+				if (chat.currentEditing) {
+					event.preventDefault();
+					event.stopPropagation();
+					
+					chat.currentEditing.reset().then((reset) => {
+						if (!reset) {
+							chat.currentEditing?.cancel();
+						}
+					});
+				}
+				if (!target.innerText.trim()) onEscape?.();
+				return;
+			}
+			
+			case 'ArrowUp': {
+				const target = event.target as HTMLElement;
+				if (target.innerText.length === 0 || window.getSelection()?.anchorOffset === 0) {
+					event.preventDefault();
+					event.stopPropagation();
+					
+					onNavigateToPreviousMessage?.();
+					
+					if (event.altKey) {
+						chat.composer?.setCursorToStart();
+					}
+				}
+				return;
+			}
+			
+			case 'ArrowDown': {
+				const target = event.target as HTMLElement;
+				const textLength = target.innerText.length;
+				if (textLength === 0 || window.getSelection()?.anchorOffset === textLength) {
+					event.preventDefault();
+					event.stopPropagation();
+					
+					onNavigateToNextMessage?.();
+					
+					if (event.altKey) {
+						chat.composer?.setCursorToEnd();
+					}
 				}
 				return;
 			}
 		}
 		
 		onTyping?.();
-	}, [contentEditableValue, sendOnEnter, chat.composer, handleSendMessage, onTyping]);
+	}, [composerValue, sendOnEnter, chat?.composer, chat?.currentEditing, chat?.messageEditing, handleSendMessage, onEscape, onNavigateToNextMessage, onNavigateToPreviousMessage, onTyping]);
 
 	const closeEditing = (event: KeyboardEvent | MouseEvent<HTMLElement>) => {
 		if (chat.currentEditing) {
@@ -221,70 +280,7 @@ const MessageBox = ({
 	};
 
 	const keyboardEventHandler = useEffectEvent((event: KeyboardEvent) => {
-		const { which: keyCode } = event;
-
-		const input = event.target as HTMLTextAreaElement;
-
-		const isSubmitKey = keyCode === keyCodes.CARRIAGE_RETURN || keyCode === keyCodes.NEW_LINE;
-
-		if (isSubmitKey) {
-			const withModifier = event.shiftKey || event.ctrlKey || event.altKey || event.metaKey;
-			const isSending = (sendOnEnter && !withModifier) || (!sendOnEnter && withModifier);
-
-			event.preventDefault();
-			if (!isSending) {
-				chat.composer?.insertNewLine();
-				return false;
-			}
-			handleSendMessage();
-			return false;
-		}
-
-		if (chat.composer && handleFormattingShortcut(event, [...formattingButtons], chat.composer)) {
-			return;
-		}
-
-		if (event.shiftKey || event.ctrlKey || event.metaKey) {
-			return;
-		}
-
-		switch (event.key) {
-			case 'Escape': {
-				closeEditing(event);
-				if (!input.value.trim()) onEscape?.();
-				return;
-			}
-
-			case 'ArrowUp': {
-				if (input.selectionEnd === 0) {
-					event.preventDefault();
-					event.stopPropagation();
-
-					onNavigateToPreviousMessage?.();
-
-					if (event.altKey) {
-						input.setSelectionRange(0, 0);
-					}
-				}
-
-				return;
-			}
-
-			case 'ArrowDown': {
-				if (input.selectionEnd === input.value.length) {
-					event.preventDefault();
-					event.stopPropagation();
-
-					onNavigateToNextMessage?.();
-
-					if (event.altKey) {
-						input.setSelectionRange(input.value.length, input.value.length);
-					}
-				}
-			}
-		}
-
-		onTyping?.();
+		handleComposerKeyDown(event);
 	});
 
 	const isEditing = useSyncExternalStore(chat.composer?.editing.subscribe ?? emptySubscribe, chat.composer?.editing.get ?? getEmptyFalse);
@@ -311,11 +307,12 @@ const MessageBox = ({
 
 	const isRecording = isRecordingAudio || isRecordingVideo;
 
-	const { textAreaStyle, shadowStyle } = useAutoGrow(textareaRef, shadowRef, isRecordingAudio);
+	// Not using useAutoGrow for contentEditable
+	const textAreaStyle = {};
 
 	const canSend = useReactiveValue(useCallback(() => roomCoordinator.verifyCanSendMessage(room._id), [room._id]));
 
-	const sizes = useContentBoxSize(textareaRef);
+	const sizes = useContentBoxSize(composerRef);
 
 	const format = useFormatDateAndTime();
 
@@ -323,7 +320,7 @@ const MessageBox = ({
 		mutationFn: async () => onJoin?.(),
 	});
 
-	const handlePaste = useEffectEvent((event: ClipboardEvent<HTMLTextAreaElement>) => {
+	const handlePaste = useEffectEvent((event: ClipboardEvent<HTMLDivElement>) => {
 		const { clipboardData } = event;
 
 		if (!clipboardData) {
@@ -368,7 +365,7 @@ const MessageBox = ({
 
 	const keyDownHandlerCallbackRef = useSafeRefCallback(
 		useCallback(
-			(node: HTMLTextAreaElement) => {
+			(node: HTMLDivElement) => {
 				if (node === null) {
 					return;
 				}
@@ -383,7 +380,7 @@ const MessageBox = ({
 		),
 	);
 
-	const mergedRefs = useMessageComposerMergedRefs(popup.callbackRef, textareaRef, callbackRef, autofocusRef, keyDownHandlerCallbackRef);
+	const mergedRefs = useMessageComposerMergedRefs(popup.callbackRef, composerRef, callbackRef, autofocusRef, keyDownHandlerCallbackRef);
 
 	const shouldPopupPreview = useEnablePopupPreview(popup.filter, popup.option);
 
@@ -421,27 +418,19 @@ const MessageBox = ({
 			{isRecordingVideo && <VideoMessageRecorder reference={messageComposerRef} rid={room._id} tmid={tmid} />}
 			<MessageComposer ref={messageComposerRef} variant={isEditing ? 'editing' : undefined}>
 				{isRecordingAudio && <AudioMessageRecorder rid={room._id} isMicrophoneDenied={isMicrophoneDenied} />}
-				<ContentEditableDiv
-					ref={contentEditableRef}
-					placeholder={`${composerPlaceholder} (Rich Input)`}
-					value={contentEditableValue}
-					onChange={handleContentEditableChange}
-					onKeyDown={handleContentEditableKeyDown}
-					disabled={isRecording || !canSend}
-					aria-label={`${composerPlaceholder} Rich Input`}
-				/>
-				<MessageComposerInput
+				<ContentEditableMessageComposerInput
 					ref={mergedRefs}
 					aria-label={composerPlaceholder}
-					name='msg'
-					disabled={isRecording || !canSend}
-					onChange={setTyping}
-					style={textAreaStyle}
+					value={composerValue}
 					placeholder={composerPlaceholder}
+					disabled={isRecording || !canSend}
+					onChange={handleComposerChange}
+					onKeyDown={handleComposerKeyDown}
 					onPaste={handlePaste}
 					aria-activedescendant={popup.focused ? `popup-item-${popup.focused._id}` : undefined}
+					style={textAreaStyle}
 				/>
-				<div ref={shadowRef} style={shadowStyle} />
+				<div ref={shadowRef} style={{}} />
 				<MessageComposerToolbar>
 					<MessageComposerToolbarActions aria-label={t('Message_composer_toolbox_primary_actions')}>
 						<MessageComposerAction
@@ -481,10 +470,10 @@ const MessageBox = ({
 								<MessageComposerAction
 									aria-label={t('Send')}
 									icon='send'
-									disabled={!canSend || (!typing && !isEditing && !contentEditableValue.trim())}
+									disabled={!canSend || (!typing && !isEditing)}
 									onClick={handleSendMessage}
-									secondary={typing || isEditing || !!contentEditableValue.trim()}
-									info={typing || isEditing || !!contentEditableValue.trim()}
+									secondary={typing || isEditing}
+									info={typing || isEditing}
 								/>
 							</>
 						)}
